@@ -1,0 +1,102 @@
+name: Build apps
+
+# Every push to main tests on Windows, macOS and Linux, then builds the three
+# desktop apps plus the Excel spreadsheet (download them from the run's
+# "Artifacts" section).
+# To publish a GitHub Release: Actions tab -> Build apps -> Run workflow, and
+# enter a version (e.g. v2.0.0). Pushing a v* tag does the same.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version to publish, e.g. v2.0.0 (leave blank to just build)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+env:
+  APP: RuskiMaxxingSupertotal  # file-name prefix for the built apps and spreadsheet
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            suffix: Windows.exe
+          - os: macos-latest
+            suffix: macOS.zip
+          - os: ubuntu-latest
+            suffix: Linux.tar.gz
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements-dev.txt
+      - name: Test
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then xvfb-run -a pytest -q; else pytest -q; fi
+
+      - name: Build app (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          pyinstaller --noconfirm --onefile --windowed --name "$APP" packaging/launcher.py
+          mv "dist/$APP.exe" "$APP-${{ matrix.suffix }}"
+      - name: Build app (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          pyinstaller --noconfirm --windowed --name "$APP" --osx-bundle-identifier "io.github.$APP" packaging/launcher.py
+          ditto -c -k --keepParent "dist/$APP.app" "$APP-${{ matrix.suffix }}"
+      - name: Build app (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          pyinstaller --noconfirm --onefile --windowed --name "$APP" packaging/launcher.py
+          tar -czf "$APP-${{ matrix.suffix }}" -C dist "$APP"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP }}-${{ matrix.suffix }}
+          path: ${{ env.APP }}-${{ matrix.suffix }}
+
+  spreadsheet:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install .
+      - run: ruskimaxxing excel "$APP.xlsx"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP }}.xlsx
+          path: ${{ env.APP }}.xlsx
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.version != '')
+    needs: [build, spreadsheet]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.version || github.ref_name }}
+          target_commitish: ${{ github.sha }}
+          files: assets/*
+          generate_release_notes: true
