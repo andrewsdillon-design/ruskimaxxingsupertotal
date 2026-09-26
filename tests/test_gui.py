@@ -80,3 +80,50 @@ def test_unsaved_edits_are_kept_when_switching_day(app):
     app.refresh()
     first = [e for e in app.store.workout(1, 0) if e.exercise == "Squat"][0]
     assert first.weight == 190 and first.done
+
+
+def test_month_and_week_dropdowns(app):
+    assert app.month_pick.get().startswith("Month 1 - Weeks 1-4")
+    assert len(app.week_combo["values"]) == 4
+    app.month_pick.set(app.month_labels[13])
+    app._pick_month()
+    assert app._week() == 49 and app.week_combo["values"][-1].startswith("Week 52")
+    app._today()
+    assert app.month_pick.get() == app.month_labels[__import__("ruskimaxxing.program").program.month_of(app._week())]
+
+
+def test_cloud_sign_in_states(app, monkeypatch):
+    import time
+    import webbrowser
+
+    def labels():
+        return [w.cget("text") for w in app.cloud_btns.winfo_children()]
+    assert "Sign in or create account" in labels()
+    s = app.store
+    s.set("cloud_link_device", "dev"), s.set("cloud_link_code", "ABCD-EFGH")
+    s.set("cloud_link_until", str(time.time() + 600))
+    app.refresh_cloud()
+    assert "Code ABCD-EFGH" in labels() and "Cancel" in labels()
+    app._cloud_cancel()
+    assert "Sign in or create account" in labels()
+    opened = []
+    monkeypatch.setattr(webbrowser, "open", opened.append)
+    s.set("cloud_token", "t"), s.set("cloud_email", "me@example.com")
+    app.refresh_cloud()
+    assert "Back up now" in labels()
+    app._cloud_delete()
+    assert opened == ["https://api.ruskimaxxing.com/account/delete"]
+
+
+def test_update_bar(app):
+    from ruskimaxxing.updates import Update
+    app._show_update(Update("99.0.0", "https://dl/win.exe", "https://page"), asked=False)
+    assert app.update_bar.winfo_manager() == "pack"
+    texts = [w.cget("text") for w in app.update_bar.winfo_children()]
+    assert any("99.0.0" in t for t in texts) and "Download" in texts
+    next(w for w in app.update_bar.winfo_children() if w.cget("text") == "Not now").invoke()
+    assert app.update_bar.winfo_manager() == ""
+    app._show_update(Update("99.0.0", "u", "p"), asked=False)       # dismissed: stays hidden
+    assert app.update_bar.winfo_manager() == ""
+    app._show_update(None, asked=True)
+    assert "latest" in app.update_status.cget("text")

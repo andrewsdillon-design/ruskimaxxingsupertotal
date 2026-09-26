@@ -6,8 +6,11 @@ charted against bodyweight) - Body (weekly bodyweight, monthly body fat) - Log.
 All data lives in a local SQLite file (see storage.py).
 """
 
+import os
 import sys
 import threading
+import time
+import webbrowser
 import tkinter as tk
 from pathlib import Path
 from datetime import date, timedelta
@@ -21,9 +24,10 @@ from ruskimaxxing.exercises import (CATALOG, JUMP_STANDARDS, LEVELS, MAIN, box_j
                                    jump_level, jump_targets)
 from ruskimaxxing.prilepin import ZONES
 from ruskimaxxing.program import (MONTHS, SHOULDER_TIP, WEEKS, bodyfat_week, build_program,
-                                  next_monday, week_label)
+                                  month_label, month_of, month_weeks, next_monday, week_label)
 from ruskimaxxing.storage import Store
-from ruskimaxxing.sync import DEFAULT_SERVER, Cloud, CloudError
+from ruskimaxxing.sync import Cloud, CloudError
+from ruskimaxxing.updates import check_for_update, dismiss, dismissed
 from ruskimaxxing.tracking import (BODYFAT_GUIDE, BODYFAT_METHODS, REP_MAX_COUNTS, BodyFat,
                                    BodyWeight, LogEntry, best_e1rm, e1rm_history, new_prs,
                                    rep_maxes)
@@ -197,6 +201,9 @@ class App(ttk.Frame):
                  font=("TkDefaultFont", 10, "bold"), fg=BYZ["gold_light"], bg=BYZ["purple_dark"]).pack(anchor="w")
         tk.Label(self, text=SHOULDER_TIP, bg=BYZ["crimson"], fg=BYZ["ivory"], font=("TkDefaultFont", 9, "bold"),
                  wraplength=1100, justify="left", padx=10, pady=4).pack(fill="x")
+        tk.Label(banner, text=f"v{__version__}", fg=BYZ["gold_light"], bg=BYZ["purple_dark"]).pack(
+            side="right", anchor="s", padx=8, pady=4)
+        self.update_bar = tk.Frame(self, bg=BYZ["gold"])       # shown only when a newer version is out
         self.tabs = ttk.Notebook(self)
         self.tabs.pack(fill="both", expand=True, pady=(4, 0))
         for name, builder in (("Start", self._start_tab), ("Program", self._program_tab),
@@ -210,6 +217,8 @@ class App(ttk.Frame):
         root.columnconfigure(0, weight=1)
         root.rowconfigure(0, weight=1)
         self.refresh()
+        if not os.environ.get("RUSKIMAXXING_NO_UPDATE_CHECK"):
+            self.check_updates(force=False)
 
     # ----- helpers ----------------------------------------------------------------
     @property
@@ -299,6 +308,7 @@ class App(ttk.Frame):
                                            (220, 120, 90), height=5)
         frame.pack(fill="both", expand=True, pady=(6, 0))
         self._cloud_box(left)
+        self._updates_box(left)
 
         box = ttk.LabelFrame(right, text="PR board", padding=6)
         box.pack(fill="x")
@@ -345,29 +355,83 @@ class App(ttk.Frame):
         self.refresh()
 
     # ----- cloud backup ---------------------------------------------------------
+    # ----- app updates -------------------------------------------------------------
+    def _updates_box(self, parent):
+        box = ttk.LabelFrame(parent, text="App updates", padding=6)
+        box.pack(fill="x", pady=(8, 0))
+        self.update_status = ttk.Label(box, text=f"You have version {__version__}.", foreground="#6b5a45")
+        self.update_status.pack(side="left")
+        ttk.Button(box, text="Check for updates", style="Small.TButton",
+                   command=lambda: self.check_updates(force=True)).pack(side="left", padx=8)
+
+    def check_updates(self, force=True):
+        """Look for a newer release in the background; show a bar at the top if there is one."""
+        if force:
+            self.update_status.config(text="Checking...")
+
+        def worker():
+            update = check_for_update(self.store, force=force)
+            self.root.after(0, lambda: self._show_update(update, force))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _show_update(self, update, asked):
+        for w in self.update_bar.winfo_children():
+            w.destroy()
+        self.update_bar.pack_forget()
+        if not update:
+            self.update_status.config(text=f"You have version {__version__}" +
+                                      (" - it's the latest." if asked else "."))
+            return
+        self.update_status.config(text=f"You have {__version__}. Version {update.version} is available.")
+        if dismissed(self.store, update) and not asked:
+            return
+        style = {"bg": BYZ["gold"], "fg": BYZ["purple_dark"], "font": ("TkDefaultFont", 10, "bold")}
+        tk.Label(self.update_bar, text=f"Update available: version {update.version} (you have {__version__})",
+                 **style).pack(side="left", padx=10, pady=3)
+        ttk.Button(self.update_bar, text="Download", style="Small.TButton",
+                   command=lambda: webbrowser.open(update.url)).pack(side="left")
+        ttk.Button(self.update_bar, text="What's new", style="Small.TButton",
+                   command=lambda: webbrowser.open(update.page)).pack(side="left", padx=4)
+
+        def later():
+            dismiss(self.store, update)
+            self.update_bar.pack_forget()
+        ttk.Button(self.update_bar, text="Not now", style="Small.TButton", command=later).pack(side="right", padx=6)
+        self.update_bar.pack(fill="x", before=self.tabs)
+
     def _cloud_box(self, parent):
         self.cloud = Cloud(self.store)
         box = ttk.LabelFrame(parent, text="3. Cloud backup (optional) - get your data back on a new device", padding=6)
         box.pack(fill="x", pady=(8, 0))
-        self.cloud_url = tk.StringVar(value=self.store.get("cloud_url", "") or DEFAULT_SERVER)
-        self.cloud_email = tk.StringVar(value=self.store.get("cloud_email", ""))
-        self.cloud_pw = tk.StringVar()
-        ttk.Label(box, text="Server").grid(row=0, column=0, sticky="w", padx=(0, 4))
-        ttk.Entry(box, textvariable=self.cloud_url, width=40).grid(row=0, column=1, columnspan=3, sticky="w")
-        ttk.Label(box, text="Email").grid(row=1, column=0, sticky="w", padx=(0, 4), pady=2)
-        ttk.Entry(box, textvariable=self.cloud_email, width=24).grid(row=1, column=1, sticky="w")
-        ttk.Label(box, text="Password").grid(row=1, column=2, sticky="w", padx=(10, 4))
-        ttk.Entry(box, textvariable=self.cloud_pw, width=18, show="*").grid(row=1, column=3, sticky="w")
-        bar = ttk.Frame(box)
-        bar.grid(row=2, column=0, columnspan=4, sticky="w", pady=(4, 0))
         ttk.Style(self.root).configure("Small.TButton", padding=(4, 1), font=("TkDefaultFont", 9, "bold"))
-        for text, action in (("Sign up", self._cloud_register), ("Log in", self._cloud_login),
-                             ("Back up", self._cloud_sync), ("Forgot password", self._cloud_reset),
-                             ("Log out", self._cloud_logout), ("Delete account", self._cloud_delete)):
-            ttk.Button(bar, text=text, command=action, style="Small.TButton", width=len(text)).pack(
-                side="left", padx=(0, 2))
-        self.cloud_status = ttk.Label(box, text=self.cloud.status(), foreground="#6b5a45")
-        self.cloud_status.grid(row=3, column=0, columnspan=4, sticky="w", pady=(3, 0))
+        self.cloud_status = ttk.Label(box, foreground="#6b5a45")
+        self.cloud_status.pack(anchor="w")
+        self.cloud_btns = ttk.Frame(box)
+        self.cloud_btns.pack(anchor="w", pady=(4, 0))
+        self._cloud_polling = False
+        self.refresh_cloud()
+        if self.cloud.pending_code:     # closed while signing in: keep waiting
+            self._poll_sign_in()
+
+    def refresh_cloud(self):
+        self.cloud_status.config(text=self.cloud.status())
+        for w in self.cloud_btns.winfo_children():
+            w.destroy()
+        if self.cloud.logged_in:
+            actions = (("Back up now", self._cloud_sync), ("Log out", self._cloud_logout),
+                       ("Delete account (website)", self._cloud_delete))
+        elif self.cloud.pending_code:
+            ttk.Label(self.cloud_btns, text=f"Code {self.cloud.pending_code}", font=("TkDefaultFont", 12, "bold"),
+                      foreground=BYZ["purple"]).pack(side="left", padx=(0, 8))
+            actions = (("Open sign-in page again", lambda: webbrowser.open(self.store.get("cloud_link_url", ""))),
+                       ("Cancel", self._cloud_cancel))
+        else:
+            actions = (("Sign in or create account", self._cloud_sign_in),)
+            ttk.Label(self.cloud_btns, text="  Opens the RuskiMaxxing website in your browser. Accounts are free.",
+                      foreground="#6b5a45").pack(side="right")
+        for text, action in actions:
+            ttk.Button(self.cloud_btns, text=text, command=action, style="Small.TButton").pack(side="left",
+                                                                                             padx=(0, 4))
 
     def _cloud_run(self, work, done_message=None):
         """Run a network call off the UI thread, then report back."""
@@ -385,8 +449,7 @@ class App(ttk.Frame):
         threading.Thread(target=worker, daemon=True).start()
 
     def _cloud_done(self, message, error):
-        self.cloud_pw.set("")
-        self.cloud_status.config(text=self.cloud.status())
+        self.refresh_cloud()
         if error:
             messagebox.showerror("Cloud backup", error, parent=self.root)
         else:
@@ -394,32 +457,51 @@ class App(ttk.Frame):
                 messagebox.showinfo("Cloud backup", message, parent=self.root)
             self.refresh(rebuild=True)
 
-    def _cloud_register(self):
-        url, email, pw = self.cloud_url.get(), self.cloud_email.get(), self.cloud_pw.get()
-        self._cloud_run(lambda: (self.cloud.register(url, email, pw), self.cloud.sync())[1],
-                        lambda r: f"Account created and {r[0]} records backed up.")
+    def _cloud_sign_in(self):
+        def started(link):
+            webbrowser.open(link["url"])
+            self._poll_sign_in()
+            return ""
+        self._cloud_run(lambda: started(self.cloud.start_browser_sign_in()))
 
-    def _cloud_login(self):
-        url, email, pw = self.cloud_url.get(), self.cloud_email.get(), self.cloud_pw.get()
-        self._cloud_run(lambda: (self.cloud.login(url, email, pw), self.cloud.sync())[1],
-                        lambda r: f"Logged in. Restored {r[1]} records, backed up {r[0]}.")
+    def _cloud_cancel(self):
+        self.cloud.cancel_sign_in()
+        self.refresh_cloud()
+
+    def _poll_sign_in(self):
+        """Check every 2 seconds (off the UI thread) until the website sign-in is finished or expires."""
+        if self._cloud_polling:
+            return
+        self._cloud_polling = True
+
+        def worker():
+            while self.cloud.pending_code:
+                time.sleep(2)
+                try:
+                    if self.cloud.poll_sign_in():
+                        sent, got = self.cloud.sync()
+                        msg = f"Signed in as {self.cloud.email}. Restored {got} records, backed up {sent}."
+                        self.root.after(0, lambda: self._cloud_done(msg, None))
+                        break
+                except CloudError as e:
+                    if not self.cloud.pending_code and not self.cloud.logged_in:
+                        self.root.after(0, lambda e=e: self._cloud_done("", str(e)))
+                        break
+                    if self.cloud.logged_in:   # signed in; only the first backup failed (e.g. 402)
+                        self.root.after(0, lambda e=e: self._cloud_done(str(e), None))
+                        break
+            self._cloud_polling = False
+            self.root.after(0, self.refresh_cloud)
+        threading.Thread(target=worker, daemon=True).start()
 
     def _cloud_sync(self):
         self._cloud_run(self.cloud.sync, lambda r: f"Backed up {r[0]}, received {r[1]} records.")
-
-    def _cloud_reset(self):
-        url, email = self.cloud_url.get(), self.cloud_email.get()
-        self._cloud_run(lambda: self.cloud.reset_password(url, email), lambda msg: msg)
 
     def _cloud_logout(self):
         self._cloud_run(self.cloud.logout, "Logged out. Your data stays on this device.")
 
     def _cloud_delete(self):
-        if not messagebox.askyesno("Delete account", "Permanently delete your cloud account and every backup on "
-                                   "the server? Data on this device stays.", parent=self.root):
-            return
-        pw = self.cloud_pw.get()
-        self._cloud_run(lambda: self.cloud.delete_account(pw), "Account and cloud backups deleted.")
+        webbrowser.open(self.cloud.account_page("/account/delete"))
 
     def autosave_workout(self):
         if self.wo_dirty:
@@ -437,12 +519,20 @@ class App(ttk.Frame):
     def _program_tab(self, tab):
         bar = ttk.Frame(tab)
         bar.pack(fill="x")
-        ttk.Button(bar, text="<", width=3, command=lambda: self._step(-1)).pack(side="left")
-        combo = ttk.Combobox(bar, textvariable=self.week, values=self.week_labels, state="readonly", width=38)
-        combo.pack(side="left", padx=4)
-        combo.bind("<<ComboboxSelected>>", lambda e: self.refresh())
-        ttk.Button(bar, text=">", width=3, command=lambda: self._step(1)).pack(side="left")
+        self.month_labels = [month_label(m) for m in range(0, MONTHS + 1)]
+        self.month_pick = tk.StringVar()
+        ttk.Label(bar, text="Month").pack(side="left")
+        month_combo = ttk.Combobox(bar, textvariable=self.month_pick, values=self.month_labels, state="readonly",
+                                   width=32)
+        month_combo.pack(side="left", padx=(4, 10))
+        month_combo.bind("<<ComboboxSelected>>", lambda e: self._pick_month())
+        ttk.Label(bar, text="Week").pack(side="left")
+        self.week_combo = ttk.Combobox(bar, textvariable=self.week, state="readonly", width=36)
+        self.week_combo.pack(side="left", padx=4)
+        self.week_combo.bind("<<ComboboxSelected>>", lambda e: self.refresh())
         ttk.Button(bar, text="This week", command=self._today).pack(side="left", padx=6)
+        self.week.trace_add("write", lambda *a: self._sync_pickers())
+        self._sync_pickers()
         self.bw_week = tk.StringVar()
         ttk.Button(bar, text="Save", command=self._save_week_bw).pack(side="right")
         ttk.Entry(bar, textvariable=self.bw_week, width=8).pack(side="right", padx=4)
@@ -496,9 +586,19 @@ class App(ttk.Frame):
         self.wo_canvas.bind_all("<Button-4>", lambda e: self.wo_canvas.yview_scroll(-1, "units"))
         self.wo_canvas.bind_all("<Button-5>", lambda e: self.wo_canvas.yview_scroll(1, "units"))
 
-    def _step(self, delta):
-        self.week.set(self.week_labels[min(WEEKS, max(0, self._week() + delta))])
-        self.refresh()
+    def _sync_pickers(self):
+        """Month dropdown follows the chosen week; the week dropdown lists only that month's weeks."""
+        if not hasattr(self, "week_combo"):
+            return
+        month = month_of(self._week())
+        self.month_pick.set(self.month_labels[month])
+        self.week_combo["values"] = [self.week_labels[w] for w in month_weeks(month)]
+
+    def _pick_month(self):
+        month = self.month_labels.index(self.month_pick.get())
+        if month_of(self._week()) != month:
+            self.week.set(self.week_labels[month_weeks(month)[0]])
+            self.refresh()
 
     def _today(self):
         self._save_settings()

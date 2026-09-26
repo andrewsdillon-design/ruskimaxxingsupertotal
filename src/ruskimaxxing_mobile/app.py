@@ -24,10 +24,13 @@ from ruskimaxxing import workout as wo
 from ruskimaxxing.edition import app_name, is_supertotal
 from ruskimaxxing.exercises import CATALOG, JUMP_STANDARDS, MAIN, jump_level, jump_targets
 from ruskimaxxing.prilepin import ZONES
-from ruskimaxxing.program import (MONTHS, SHOULDER_TIP, WEEKS, bodyfat_week, build_program,
+from ruskimaxxing.program import (MONTHS, SHOULDER_TIP, WEEKS, bodyfat_week, build_program, month_label, month_of,
+                                  month_weeks,
                                   next_monday, week_label)
 from ruskimaxxing.storage import Store
-from ruskimaxxing.sync import DEFAULT_SERVER, Cloud, CloudError
+from ruskimaxxing import __version__
+from ruskimaxxing.sync import Cloud, CloudError
+from ruskimaxxing.updates import check_for_update, dismiss, dismissed
 from ruskimaxxing.tracking import (BODYFAT_GUIDE, BODYFAT_METHODS, BodyFat, BodyWeight, LogEntry,
                                    best_e1rm, e1rm_history, rep_maxes)
 
@@ -189,10 +192,15 @@ class RuskiMaxxing(toga.App):
             content=[("Workout", self._workout_tab()), ("Progress", self._progress_tab()),
                      ("PRs", self._prs_tab()), ("Body", self._body_tab()), ("Setup", self._setup_tab())],
             on_select=self._tab_changed, style=Pack(flex=1))
+        self.update_row = col()   # filled in when a newer version is out
         self.main_window = toga.MainWindow(title=app_name())
-        self.main_window.content = col(header, self.tabs, background_color=PARCHMENT, flex=1)
+        self.main_window.content = col(header, self.update_row, self.tabs, background_color=PARCHMENT, flex=1)
         self.refresh_all()
         self.main_window.show()
+        if self.cloud.pending_code:     # the app was closed while signing in: keep waiting
+            self._watch_sign_in()
+        if toga.platform.current_platform == "android" and not os.environ.get("RUSKIMAXXING_NO_UPDATE_CHECK"):
+            asyncio.get_event_loop().create_task(self._check_updates(force=False))
 
     # ----- helpers ----------------------------------------------------------------
     def cfg(self) -> wo.Settings:
@@ -220,15 +228,20 @@ class RuskiMaxxing(toga.App):
     # ----- Workout ----------------------------------------------------------------
     def _workout_tab(self):
         self.week_label = label("", 12, True, PURPLE, flex=1, text_align="center")
+        self.month_items = [month_label(m) for m in range(0, MONTHS + 1)]
+        self.month_select = toga.Selection(items=self.month_items,
+                                           on_change=self._month_changed, style=Pack(flex=1))
+        self.week_select = toga.Selection(on_change=self._week_changed, style=Pack(flex=1))
         self.day_select = toga.Selection(on_change=self._day_changed, style=Pack(flex=1))
         self.bf_due = label("", 11, True, CRIMSON)
         self.status = label("", 10, color="#666666")
         self.bw_input = number_input(step="0.1", width=90)
         self.wo_scroll = toga.ScrollContainer(horizontal=False, content=toga.Box(), style=Pack(flex=1))
         return col(
-            row(button("<", lambda w: self._step(-1), width=44), self.week_label,
-                button(">", lambda w: self._step(1), width=44), gap=6),
-            row(self.day_select, margin_top=6),
+            row(self.week_label, button("This week", self._this_week, width=100), gap=6),
+            row(label("Month", 11, True, width=56), self.month_select, gap=6, margin_top=6),
+            row(label("Week", 11, True, width=56), self.week_select, gap=6, margin_top=4),
+            row(label("Day", 11, True, width=56), self.day_select, gap=6, margin_top=4),
             row(label("Bodyweight this week", 11), self.bw_input, button("Save", self._save_bw), gap=6,
                 margin_top=6),
             self.bf_due,
@@ -237,16 +250,33 @@ class RuskiMaxxing(toga.App):
             self.status,
             self.wo_scroll, margin=8, gap=2, flex=1)
 
-    def _step(self, delta):
+    def _go(self, week):
         self.autosave()
-        self.week = min(WEEKS, max(0, self.week + delta))
+        self.week = min(WEEKS, max(0, week))
         self.render_workout()
+
+    def _this_week(self, widget=None):
+        self._go(self._current_week())
+
+    def _month_changed(self, widget, **kw):
+        if getattr(self, "_filling_days", False) or widget.value is None:
+            return
+        month = self.month_items.index(widget.value)
+        if month_of(self.week) != month:
+            self._go(month_weeks(month)[0])
+
+    def _week_changed(self, widget, **kw):
+        if getattr(self, "_filling_days", False) or widget.value is None:
+            return
+        week = month_weeks(month_of(self.week))[self.week_items.index(widget.value)]
+        if week != self.week:
+            self._go(week)
 
     def _day_changed(self, widget, **kw):
         if getattr(self, "_filling_days", False) or widget.value is None:
             return
         self.autosave()
-        self.day = self.day_select.items.index(widget.value)
+        self.day = self.day_items.index(widget.value)
         self.render_workout(fill_days=False)
 
     def _mark_dirty(self, *args, **kw):
@@ -256,19 +286,27 @@ class RuskiMaxxing(toga.App):
 
     def render_workout(self, blocks=None, fill_days=True):
         cfg = self.cfg()
-        self.week_label.text = short_week(self.week)
+        month = month_of(self.week)
+        self.week_label.text = ("Baseline test - Week 0" if self.week == 0 else
+                                f"Month {month} of {MONTHS}  -  Week {self.week} of {WEEKS}")
         bw = {b.week: b.weight for b in self.store.bodyweights()}
         self.bw_input.value = Decimal(str(bw[self.week])) if self.week in bw else None
-        month = next((m for m in range(1, MONTHS + 1) if bodyfat_week(m) == self.week), None)
-        self.bf_due.text = f"Body fat test due (month {month}) - Body tab" if month else ""
+        bf_month = next((m for m in range(1, MONTHS + 1) if bodyfat_week(m) == self.week), None)
+        self.bf_due.text = f"Body fat test due (month {bf_month}) - Body tab" if bf_month else ""
         if fill_days:
             self._filling_days = True
+            self.month_select.value = self.month_items[month]
+            weeks = month_weeks(month)
+            self.week_items = [f"{short_week(w)} - {wo.session(w, 0).date(cfg.start):%b %d}" for w in weeks]
+            self.week_select.items = self.week_items
+            self.week_select.value = self.week_items[weeks.index(self.week)]
             items = []
             for i in range(3):
                 s = wo.session(self.week, i)
                 done, planned = wo.day_progress(self.store, self.week, i)
                 items.append(f"{s.day} - {s.date(cfg.start):%a %b %d} - {done}/{planned}"
                              + (" ✓" if done >= planned else ""))
+            self.day_items = items
             self.day_select.items = items
             self.day_select.value = items[self.day]
             self._filling_days = False
@@ -510,11 +548,9 @@ class RuskiMaxxing(toga.App):
         for text, z in zip(("Under 70%", "70-80%", "80-90%", "90%+"), ZONES):
             prilepin.add(label(f"{text}:  {z.reps_per_set[0]}-{z.reps_per_set[1]} reps/set,  "
                                f"{z.optimal_total} optimal ({z.total_range[0]}-{z.total_range[1]})", 11))
-        self.cloud_url = toga.TextInput(value=s.get("cloud_url", "") or DEFAULT_SERVER,
-                                        placeholder="Server, e.g. https://api.your-domain.com")
-        self.cloud_email = toga.TextInput(value=s.get("cloud_email", ""), placeholder="Email")
-        self.cloud_pw = toga.PasswordInput(placeholder="Password (8+ characters)")
         self.cloud_status = label(Cloud(s).status(), 10, color="#6b5a45")
+        self.cloud_box = col(gap=4)
+        self.update_status = label(f"Version {__version__}", 10, color="#6b5a45", flex=1)
         tip = toga.Label(wrap(SHOULDER_TIP, 10), style=Pack(font_size=10, font_weight="bold", color=IVORY,
                                                             background_color=CRIMSON, margin=6))
         return toga.ScrollContainer(horizontal=False, content=col(
@@ -536,12 +572,10 @@ class RuskiMaxxing(toga.App):
             self.base_list,
             section("3. Cloud backup (optional)"),
             label("Back up to the cloud so you can log in on a new phone and get everything back.", 10),
-            self.cloud_url, self.cloud_email, self.cloud_pw,
-            row(button("Sign up", self._cloud_register, flex=1), button("Log in", self._cloud_login, flex=1), gap=6),
-            row(button("Back up now", self._cloud_sync, flex=1), button("Log out", self._cloud_logout, flex=1), gap=6),
-            row(button("Forgot password", self._cloud_reset, flex=1),
-                button("Delete account", self._cloud_delete, flex=1), gap=6),
             self.cloud_status,
+            self.cloud_box,
+            section("App updates"),
+            row(self.update_status, button("Check for updates", self._check_updates_now, width=150), gap=6),
             section("Prilepin's chart"),
             prilepin,
             margin=8, gap=4))
@@ -586,55 +620,154 @@ class RuskiMaxxing(toga.App):
         try:
             result = await asyncio.get_running_loop().run_in_executor(None, work)
         except CloudError as e:
-            self.cloud_status.text = wrap(self.cloud.status(), 10)
-            self.cloud_pw.value = ""
+            self.refresh_cloud()
             if e.code == 402:  # signed in, backups just aren't active for this account
                 self.refresh_all()
                 await self.info("Cloud backup", str(e))
             else:
                 await self.main_window.dialog(toga.ErrorDialog("Cloud backup", str(e)))
             return
-        self.cloud_pw.value = ""
-        self.cloud_status.text = wrap(self.cloud.status(), 10)
         self.refresh_all()
         message = done(result) if callable(done) else done
         if message:
             await self.info("Cloud backup", message)
 
-    async def _cloud_register(self, widget):
-        url, email, pw = self.cloud_url.value, self.cloud_email.value, self.cloud_pw.value
-        await self._cloud(lambda: (self.cloud.register(url, email, pw), self.cloud.sync())[1],
-                          lambda r: f"Account created and {r[0]} records backed up.")
+    # ----- updates --------------------------------------------------------------------
+    async def _check_updates_now(self, widget):
+        await self._check_updates(force=True)
 
-    async def _cloud_login(self, widget):
-        url, email, pw = self.cloud_url.value, self.cloud_email.value, self.cloud_pw.value
-        await self._cloud(lambda: (self.cloud.login(url, email, pw), self.cloud.sync())[1],
-                          lambda r: f"Logged in. Restored {r[1]} records, backed up {r[0]}.")
+    async def _check_updates(self, force):
+        platform = "android" if toga.platform.current_platform == "android" else "ios"
+        if force:
+            self.update_status.text = "Checking..."
+        update = await asyncio.get_running_loop().run_in_executor(
+            None, lambda: check_for_update(self.store, platform, force=force))
+        self.show_update(update, asked=force)
+
+    def show_update(self, update, asked=False):
+        self.update_row.clear()
+        if not update:
+            self.update_status.text = f"Version {__version__}" + (" - the latest" if asked else "")
+            return
+        self.update_status.text = f"Version {__version__} - {update.version} is out"
+        if dismissed(self.store, update) and not asked:
+            return
+
+        def later(widget):
+            dismiss(self.store, update)
+            self.update_row.clear()
+        self.update_row.add(row(label(f"Update: version {update.version}", 11, True, PURPLE_DARK, flex=1),
+                                button("Download", lambda w: open_url(update.url), width=100),
+                                button("Later", later, width=70),
+                                background_color=GOLD, margin=4, gap=6))
+
+    def refresh_cloud(self):
+        """Cloud section: one big Sign in button, or the waiting state, or the signed-in actions."""
+        self.cloud_status.text = wrap(self.cloud.status(), 10)
+        self.cloud_box.clear()
+        if self.cloud.logged_in:
+            self.cloud_box.add(row(button("Back up now", self._cloud_sync, flex=1),
+                                   button("Log out", self._cloud_logout, flex=1), gap=6))
+            self.cloud_box.add(row(button("Delete account (website)", self._cloud_delete, flex=1)))
+        elif self.cloud.pending_code:
+            self.cloud_box.add(label(f"Code: {self.cloud.pending_code}", 16, True, PURPLE))
+            self.cloud_box.add(label("Sign in or create your account in the browser page that opened, then come "
+                                     "back here. This finishes by itself.", 10))
+            self.cloud_box.add(row(button("Open sign-in page again", self._cloud_reopen, flex=1),
+                                   button("Cancel", self._cloud_cancel, width=90), gap=6))
+        else:
+            self.cloud_box.add(row(button("Sign in or create account", self._cloud_sign_in, flex=1)))
+            self.cloud_box.add(label("Opens the RuskiMaxxing website in your browser. Accounts are free.", 10,
+                                     color="#6b5a45"))
+
+    async def _cloud_sign_in(self, widget):
+        self.cloud_status.text = "Opening your browser..."
+        try:
+            link = await asyncio.get_running_loop().run_in_executor(
+                None, lambda: self.cloud.start_browser_sign_in(phone=True))
+        except CloudError as e:
+            self.refresh_cloud()
+            await self.main_window.dialog(toga.ErrorDialog("Cloud backup", str(e)))
+            return
+        self.refresh_cloud()
+        open_url(link["url"])
+        self._watch_sign_in()
+
+    def _cloud_reopen(self, widget):
+        open_url(self.store.get("cloud_link_url", ""))
+
+    def _cloud_cancel(self, widget):
+        self.cloud.cancel_sign_in()
+        self.refresh_cloud()
+
+    def _watch_sign_in(self):
+        if not getattr(self, "_watching", False):
+            self._watching = True
+            asyncio.get_event_loop().create_task(self._poll_sign_in())
+
+    async def _poll_sign_in(self):
+        """Check every 2 seconds until the person finishes on the website (or the link expires)."""
+        loop = asyncio.get_running_loop()
+        try:
+            while self.cloud.pending_code:
+                await asyncio.sleep(2)
+                try:
+                    done = await loop.run_in_executor(None, self.cloud.poll_sign_in)
+                except CloudError as e:
+                    if self.cloud.pending_code:
+                        continue            # no signal for a moment: keep waiting
+                    self.refresh_cloud()
+                    await self.info("Cloud backup", str(e))
+                    return
+                if done:
+                    self.refresh_cloud()
+                    await self._cloud(self.cloud.sync, lambda r: f"Signed in as {self.cloud.email}. Restored "
+                                                                 f"{r[1]} records, backed up {r[0]}.")
+                    return
+        finally:
+            self._watching = False
+            self.refresh_cloud()
 
     async def _cloud_sync(self, widget):
         self.autosave()
         await self._cloud(self.cloud.sync, lambda r: f"Backed up {r[0]}, received {r[1]} records.")
 
-    async def _cloud_reset(self, widget):
-        url, email = self.cloud_url.value, self.cloud_email.value
-        await self._cloud(lambda: self.cloud.reset_password(url, email), lambda msg: msg)
-
     async def _cloud_logout(self, widget):
         await self._cloud(self.cloud.logout, "Logged out. Your data stays on this phone.")
 
-    async def _cloud_delete(self, widget):
-        sure = await self.main_window.dialog(toga.QuestionDialog(
-            "Delete account", "Permanently delete your cloud account and every backup on the server? "
-                              "Data on this phone stays."))
-        if sure:
-            pw = self.cloud_pw.value
-            await self._cloud(lambda: self.cloud.delete_account(pw), "Account and cloud backups deleted.")
+    def _cloud_delete(self, widget):
+        open_url(self.cloud.account_page("/account/delete"))
 
     def refresh_setup(self):
+        self.refresh_cloud()
         self.base_list.clear()
         for e in (e for e in self.store.lifts() if e.kind == "baseline"):
             self.base_list.add(row(label(f"{e.exercise}: {e.weight:g} x {e.reps}  (e1RM {e.e1rm:.0f})", 11, flex=1),
                                    button("X", lambda w, i=e.id: self._delete_base(i), width=40), gap=6))
+
+
+def open_url(url: str) -> None:
+    """Open a web page in the phone's browser (Android / iOS), or the default browser on a computer."""
+    if not url:
+        return
+    platform = toga.platform.current_platform
+    try:
+        if platform == "android":
+            from java import jclass
+            Intent, Uri = jclass("android.content.Intent"), jclass("android.net.Uri")
+            activity = jclass("org.beeware.android.MainActivity").singletonThis
+            activity.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+            return
+        if platform == "iOS":
+            from rubicon.objc import ObjCClass
+            app = ObjCClass("UIApplication").sharedApplication
+            app.openURL(ObjCClass("NSURL").URLWithString(url), options=ObjCClass("NSDictionary").dictionary(),
+                        completionHandler=None)
+            return
+    except Exception:  # fall back to the standard library
+        pass
+    import webbrowser
+    webbrowser.open(url)
 
 
 def short_week(week: int) -> str:
