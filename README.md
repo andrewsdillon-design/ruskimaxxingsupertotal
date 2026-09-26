@@ -45,7 +45,9 @@ The same program, logging and PR tracking as the desktop app, built with BeeWare
   membership ($99/year) and a Mac or CI signing setup. After that, `briefcase package iOS` produces a build
   for TestFlight / the App Store. Until then, every build compiles the iPhone app for the iOS Simulator,
   to prove it builds.
-- **Your data stays on your phone** (a local database). Cloud backup is a planned add-on.
+- **Your data stays on your phone** (a local database). Optional **cloud backup** (Setup → Cloud backup)
+  lets people log in on a new phone and get everything back. It uses the shared RuskiMaxxing Cloud
+  server, which serves both apps; see [its README](https://github.com/andrewsdillon-design/ruskimaxxing/blob/main/server/README.md).
 
 Build it yourself: `pip install briefcase`, then `briefcase dev` (preview on your computer),
 `briefcase run android` (emulator or USB phone) or `briefcase run iOS` (Mac only).
@@ -240,6 +242,12 @@ owns. Specific depictions *are* protected, such as national coats of arms (Russi
 Montenegro) and sports-club marks. So the logo deliberately leaves out their elements: no crowns,
 shield, scepter or orb, and no red field. This is not legal advice. If you plan to register it as a
 trademark, run a search on the USPTO trademark search first.
+
+## Cloud backup server
+
+Both apps back up to one shared server (desktop **Start → Cloud backup**, phone **Setup → Cloud backup**).
+Its code and one-command VPS installer live in the brother repo:
+[ruskimaxxing/server](https://github.com/andrewsdillon-design/ruskimaxxing/tree/main/server).
 
 ## License
 
