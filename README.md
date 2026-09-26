@@ -23,7 +23,32 @@ so the Olympic lifts follow it too. This is well-established training knowledge,
 | Windows app | `RuskiMaxxingSupertotal-Windows.exe` on the [Releases](../../releases) page |
 | macOS app | `RuskiMaxxingSupertotal-macOS.zip` on the [Releases](../../releases) page |
 | Linux app | `RuskiMaxxingSupertotal-Linux.tar.gz` on the [Releases](../../releases) page |
-| iPhone / Android | Planned if there's interest |
+| Android app | `RuskiMaxxingSupertotal-Android.apk` on the [Releases](../../releases) page |
+| iPhone app | Built and tested each release; needs an Apple Developer account to install (see Phone apps) |
+
+## Phone apps (Android / iPhone)
+
+<p>
+<img src="docs/screenshots/phone_workout.png" width="200" alt="Phone: workout">
+<img src="docs/screenshots/phone_progress.png" width="200" alt="Phone: progress charts">
+<img src="docs/screenshots/phone_prs.png" width="200" alt="Phone: PRs and jump standards">
+<img src="docs/screenshots/phone_setup.png" width="200" alt="Phone: setup">
+</p>
+
+The same program, logging and PR tracking as the desktop app, built with BeeWare (Python).
+
+- **Android**: download `RuskiMaxxingSupertotal-Android.apk` from the [Releases](../../releases) page and open it
+  on your phone. Android will ask you to allow "install unknown apps" for your browser or files app.
+  - To publish on **Google Play** later, you'll need a Play developer account ($25 one-time) and a signing key.
+    Briefcase builds the store bundle with `briefcase package android` (AAB).
+- **iPhone**: Apple only lets signed apps onto real iPhones, so this needs an **Apple Developer Program**
+  membership ($99/year) and a Mac or CI signing setup. After that, `briefcase package iOS` produces a build
+  for TestFlight / the App Store. Until then, every build compiles the iPhone app for the iOS Simulator,
+  to prove it builds.
+- **Your data stays on your phone** (a local database). Cloud backup is a planned add-on.
+
+Build it yourself: `pip install briefcase`, then `briefcase dev` (preview on your computer),
+`briefcase run android` (emulator or USB phone) or `briefcase run iOS` (Mac only).
 
 ## Requirements
 
@@ -176,6 +201,8 @@ tracking.py    PRs, rep maxes, training maxes, body measurements
 storage.py     local SQLite database for the app
 excel.py       builds the formula-driven workbook (month sheets, per-set rows)
 gui.py         desktop app (tkinter, Byzantine theme, per-set workout logger)
+workout.py     workout logic shared by the desktop and phone apps
+../ruskimaxxing_mobile/  phone app (BeeWare Toga): Workout, Progress, PRs, Body, Setup
 assets/        logo and app icon (regenerate: python packaging/make_logo.py)
 cli.py         command line
 ```
@@ -200,6 +227,7 @@ After changing the program, regenerate the checked-in files:
 ruskimaxxing excel spreadsheet/RuskiMaxxingSupertotal.xlsx                       # spreadsheet
 python packaging/make_logo.py                                          # logo + app icons
 xvfb-run -a -s "-screen 0 1300x900x24" python packaging/screenshots.py  # README screenshots
+xvfb-run -a -s "-screen 0 1000x900x24" python packaging/phone_screenshots.py docs/screenshots  # phone shots
 ```
 
 ## Logo
